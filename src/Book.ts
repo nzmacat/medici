@@ -1,4 +1,4 @@
-import { Types } from "mongoose";
+import {Types} from "mongoose";
 import {
   JournalAlreadyVoidedError,
   MediciError,
@@ -6,24 +6,26 @@ import {
   JournalNotFoundError,
   BookConstructorError,
 } from "./errors";
-import { handleVoidMemo } from "./helper/handleVoidMemo";
-import { addReversedTransactions } from "./helper/addReversedTransactions";
-import { flattenObject } from "./helper/flattenObject";
-import { IPaginationQuery, IFilterQuery, parseFilterQuery } from "./helper/parse/parseFilterQuery";
-import { IBalanceQuery, parseBalanceQuery } from "./helper/parse/parseBalanceQuery";
-import { Entry } from "./Entry";
-import { IJournal, journalModel } from "./models/journal";
-import { ITransaction, transactionModel } from "./models/transaction";
-import type { IOptions } from "./IOptions";
-import { lockModel } from "./models/lock";
-import { getBestSnapshot, IBalance, snapshotBalance } from "./models/balance";
+import {handleVoidMemo} from "./helper/handleVoidMemo";
+import {addReversedTransactions} from "./helper/addReversedTransactions";
+import {flattenObject} from "./helper/flattenObject";
+import {IPaginationQuery, IFilterQuery, parseFilterQuery} from "./helper/parse/parseFilterQuery";
+import {IBalanceQuery, parseBalanceQuery} from "./helper/parse/parseBalanceQuery";
+import {Entry} from "./Entry";
+import {IJournal, journalModel} from "./models/journal";
+import {ITransaction, transactionModel} from "./models/transaction";
+import type {IOptions} from "./IOptions";
+import {lockModel} from "./models/lock";
+import {getBestSnapshot, IBalance, snapshotBalance} from "./models/balance";
 
 const GROUP = {
   $group: {
     _id: null,
-    balance: { $sum: { $subtract: ["$credit", "$debit"] } },
-    notes: { $sum: 1 },
-    lastTransactionId: { $max: "$_id" },
+    balance: {$sum: {$subtract: ["$credit", "$debit"]}},
+    credit: {$sum: "$credit"},
+    debit: {$sum: "$debit"},
+    notes: {$sum: 1},
+    lastTransactionId: {$max: "$_id"},
   },
 };
 
@@ -75,7 +77,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
     return Entry.write<U, J>(this, memo, date, original_journal);
   }
 
-  async balance(query: IBalanceQuery, options = {} as IOptions): Promise<{ balance: number; notes: number }> {
+  async balance(query: IBalanceQuery, options = {} as IOptions): Promise<{ balance: number; notes: number, debit: number, credit: number }> {
     const parsedQuery = parseBalanceQuery(query, this);
     const meta = parsedQuery.meta;
     delete parsedQuery.meta;
@@ -94,26 +96,32 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
       );
       if (balanceSnapshot) {
         // Use cached balance
-        parsedQuery._id = { $gt: balanceSnapshot.transaction };
+        parsedQuery._id = {$gt: balanceSnapshot.transaction};
       }
     }
 
     const match = {
-      $match: { ...parsedQuery, ...flattenObject(meta, "meta") },
+      $match: {...parsedQuery, ...flattenObject(meta, "meta")},
     };
 
     const result = (await transactionModel.collection.aggregate([match, GROUP], options).toArray())[0];
 
     let balance = 0;
+    let credit = 0;
+    let debit = 0;
     let notes = 0;
 
     if (balanceSnapshot) {
       balance += balanceSnapshot.balance;
+      credit += balanceSnapshot.credit;
+      debit += balanceSnapshot.debit;
       notes += balanceSnapshot.notes;
     }
 
     if (result) {
       balance += parseFloat(result.balance.toFixed(this.precision));
+      credit += parseFloat(result.credit.toFixed(this.precision));
+      debit += parseFloat(result.debit.toFixed(this.precision));
       notes += result.notes;
 
       // We can do snapshots only if there is at least one entry for this balance
@@ -128,6 +136,8 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
               meta,
               transaction: result.lastTransactionId,
               balance,
+              debit,
+              credit,
               notes,
               expireInSec: this.expireBalanceSnapshotSec,
             } as IBalance & { expireInSec: number },
@@ -140,7 +150,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
           if (tooOld) {
             delete parsedQuery._id;
             const match = {
-              $match: { ...parsedQuery, ...flattenObject(meta, "meta") },
+              $match: {...parsedQuery, ...flattenObject(meta, "meta")},
             };
 
             // Important! We are going to recalculate the entire balance from the day one.
@@ -162,6 +172,8 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
                     meta,
                     transaction: resultFull.lastTransactionId,
                     balance: parseFloat(resultFull.balance.toFixed(this.precision)),
+                    credit: parseFloat(resultFull.credit.toFixed(this.precision)),
+                    debit: parseFloat(resultFull.debit.toFixed(this.precision)),
                     notes: resultFull.notes,
                     expireInSec: this.expireBalanceSnapshotSec,
                   } as IBalance & { expireInSec: number },
@@ -176,7 +188,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
       }
     }
 
-    return { balance, notes };
+    return {balance, notes, debit, credit};
   }
 
   async ledger<T = U>(
@@ -184,7 +196,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
     options = {} as IOptions
   ): Promise<{ results: T[]; total: number }> {
     // Pagination
-    const { perPage, page, ...restOfQuery } = query;
+    const {perPage, page, ...restOfQuery} = query;
     const paginationOptions: { skip?: number; limit?: number } = {};
     if (typeof perPage === "number" && Number.isSafeInteger(perPage)) {
       paginationOptions.skip = (Number.isSafeInteger(page) ? (page as number) - 1 : 0) * perPage;
@@ -206,7 +218,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
 
     let countPromise = Promise.resolve(0);
     if (paginationOptions.limit) {
-      countPromise = transactionModel.collection.countDocuments(filterQuery, { session: options.session });
+      countPromise = transactionModel.collection.countDocuments(filterQuery, {session: options.session});
     }
 
     const results = await findPromise;
@@ -248,7 +260,7 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
     reason = handleVoidMemo(reason, journal.memo);
 
     // Not using options.session here as this read operation is not necessary to be in the ACID session.
-    const transactions = await transactionModel.collection.find({ _journal: journal._id }).toArray();
+    const transactions = await transactionModel.collection.find({_journal: journal._id}).toArray();
 
     if (transactions.length !== journal._transactions.length) {
       throw new MediciError(`Transactions for journal ${journal._id} not found on book ${journal.book}`);
@@ -260,11 +272,11 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
 
     // Set this journal to void with reason and also set all associated transactions
     const resultOne = await journalModel.collection.updateOne(
-      { _id: journal._id },
-      { $set: { voided: true, void_reason: reason } },
+      {_id: journal._id},
+      {$set: {voided: true, void_reason: reason}},
       {
         session: options.session, // We must provide either session or writeConcern, but not both.
-        writeConcern: options.session ? undefined : { w: 1, j: true }, // Ensure at least ONE node wrote to JOURNAL (disk)
+        writeConcern: options.session ? undefined : {w: 1, j: true}, // Ensure at least ONE node wrote to JOURNAL (disk)
       }
     );
 
@@ -276,11 +288,11 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
       throw new ConsistencyError(`Already voided ${journal.memo} ${journal._id} journal on book ${journal.book}`);
 
     const resultMany = await transactionModel.collection.updateMany(
-      { _journal: journal._id },
-      { $set: { voided: true, void_reason: reason } },
+      {_journal: journal._id},
+      {$set: {voided: true, void_reason: reason}},
       {
         session: options.session, // We must provide either session or writeConcern, but not both.
-        writeConcern: options.session ? undefined : { w: 1, j: true }, // Ensure at least ONE node wrote to JOURNAL (disk)
+        writeConcern: options.session ? undefined : {w: 1, j: true}, // Ensure at least ONE node wrote to JOURNAL (disk)
       }
     );
 
@@ -306,13 +318,13 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
     // contentious statement to the end of the transaction.
     for (const account of accounts) {
       await lockModel.collection.updateOne(
-        { account, book: this.name },
+        {account, book: this.name},
         {
-          $set: { updatedAt: new Date() },
-          $setOnInsert: { book: this.name, account },
-          $inc: { __v: 1 },
+          $set: {updatedAt: new Date()},
+          $setOnInsert: {book: this.name, account},
+          $inc: {__v: 1},
         },
-        { upsert: true, session: options.session }
+        {upsert: true, session: options.session}
       );
     }
     return this;
@@ -321,8 +333,8 @@ export class Book<U extends ITransaction = ITransaction, J extends IJournal = IJ
   async listAccounts(options = {} as IOptions): Promise<string[]> {
     const results = await transactionModel.collection.distinct(
       "accounts",
-      { book: this.name },
-      { session: options.session }
+      {book: this.name},
+      {session: options.session}
     );
     const uniqueAccounts: Set<string> = new Set();
     for (const result of results) {

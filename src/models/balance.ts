@@ -12,6 +12,8 @@ export interface IBalance {
   transaction: Types.ObjectId;
   meta: IAnyObject;
   balance: number;
+  credit: number;
+  debit: number;
   notes: number;
   createdAt: Date;
   expireAt: Date;
@@ -81,6 +83,8 @@ export async function snapshotBalance(
     meta: JSON.stringify(balanceData.meta),
     transaction: balanceData.transaction,
     balance: balanceData.balance,
+    credit: balanceData.credit,
+    debit: balanceData.debit,
     notes: balanceData.notes,
     createdAt: new Date(),
     expireAt: new Date(Date.now() + balanceData.expireInSec * 1000),
